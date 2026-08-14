@@ -20,8 +20,8 @@ contract ArizonaForestationDAO {
     uint256 public constant VOTING_PERIOD = 3 days;
     uint256 public constant QUORUM_THRESHOLD = 50_000 * 10**18;
     
-    // Hardcoded administrative setup address authorized to set or revoke the robot relayer once
-    address public constant INITIAL_ADMIN = 0xbe53702c6f57af155410f883f38f92414d39e3d5;
+    // Properly checksummed administrative setup address authorized to set or revoke the robot relayer once
+    address public constant INITIAL_ADMIN = 0xBe53702c6f57aF155410f883f38f92414d39E3d5;
 
     IERC20 public immutable obsToken;
     address public robotExecutionRelayer;
@@ -79,7 +79,6 @@ contract ArizonaForestationDAO {
         require(_obsToken != address(0), "Invalid OBS token address");
         obsToken = IERC20(_obsToken);
         owner = msg.sender;
-        // Robot relayer starts unassigned (address(0)) until the hardcoded admin registers it upon delivery
         robotExecutionRelayer = address(0);
         relayerLocked = false;
         relayerUpdatePermissionRevoked = false;

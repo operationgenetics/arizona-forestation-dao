@@ -35,7 +35,7 @@ contract ArizonaForestationDAOTest is Test {
     MockERC20 public token;
 
     address owner = address(0x1);
-    address constant HARDCODED_ADMIN = 0xbe53702c6f57af155410f883f38f92414d39e3d5;
+    address constant HARDCODED_ADMIN = 0xBe53702c6f57aF155410f883f38f92414d39E3d5;
     address robotRelayerWallet = address(0x99);
     address voter1 = address(0x3);
     address recipient = address(0x4);
@@ -60,18 +60,15 @@ contract ArizonaForestationDAOTest is Test {
     }
 
     function test_SetRelayerAndRevokePermission() public {
-        // Only HARDCODED_ADMIN can set the robot relayer
         vm.prank(HARDCODED_ADMIN);
         dao.setRobotRelayer(robotRelayerWallet);
         assertEq(dao.robotExecutionRelayer(), robotRelayerWallet);
 
-        // HARDCODED_ADMIN revokes permission and locks contract permanently
         vm.prank(HARDCODED_ADMIN);
         dao.revokeRelayerPermissionAndLock();
         assertTrue(dao.relayerUpdatePermissionRevoked());
         assertTrue(dao.relayerLocked());
 
-        // Attempting to change relayer after revocation must revert
         vm.prank(HARDCODED_ADMIN);
         vm.expectRevert("Permission permanently revoked and contract locked");
         dao.setRobotRelayer(address(0x88));
