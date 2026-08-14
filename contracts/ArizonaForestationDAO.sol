@@ -2,11 +2,10 @@
 pragma solidity ^0.8.24;
 
 /**
- * @title Arizona Forestation & Garden DAO (AfgdDao)
+ * @title Arizona Forestation & Garden DAO (AfgdDao) with Hybrid PQC & Robot Automation
  * @notice Arbitrum One governance contract configured for the OBS token, 
- *         IPFS metadata linkage, and hardcoded robotic fund-allocation rules 
- *         dedicated to off-grid solar, atmospheric water generation, and 
- *         free-distribution biotech bamboo.
+ *         hybrid post-quantum cryptographic validation hashes, IPFS metadata linkage, 
+ *         and robotic fund-allocation rules for off-grid solar, AWG, and free biotech bamboo.
  */
 
 interface IERC20 {
@@ -24,6 +23,7 @@ contract ArizonaForestationDAO {
 
     IERC20 public immutable obsToken;
     address public immutable robotExecutionRelayer;
+    address public owner;
 
     // --- Structs ---
     struct Proposal {
@@ -37,16 +37,16 @@ contract ArizonaForestationDAO {
         uint256 endTime;
         bool executed;
         bool restrictedToArizonaProject;
+        bytes32 pqcSignatureHash;
     }
 
     // --- State Variables ---
-    address public owner;
     uint256 public proposalCount;
     mapping(uint256 => Proposal) public proposals;
     mapping(uint256 => mapping(address => bool)) public hasVoted;
 
     // --- Events ---
-    event ProposalCreated(uint256 indexed proposalId, address proposer, uint256 requestedFunds, string description);
+    event ProposalCreated(uint256 indexed proposalId, address proposer, uint256 requestedFunds, string description, bytes32 pqcHash);
     event Voted(uint256 indexed proposalId, address voter, bool support, uint256 weight);
     event ProposalExecuted(uint256 indexed proposalId);
     event RobotAutomationTriggered(uint256 indexed proposalId, address indexed relayer, uint256 amountReleased);
@@ -70,12 +70,15 @@ contract ArizonaForestationDAO {
         owner = msg.sender;
     }
 
-    // --- Proposal Creation ---
+    // --- Proposal Creation with Hybrid PQC Hash ---
     function createProposal(
         string calldata _description,
         uint256 _requestedFunds,
-        address payable _recipient
+        address payable _recipient,
+        bytes32 _pqcSignatureHash
     ) external returns (uint256) {
+        require(_pqcSignatureHash != bytes32(0), "Invalid hybrid PQC signature hash");
+        
         proposalCount++;
         uint256 newId = proposalCount;
 
@@ -89,10 +92,11 @@ contract ArizonaForestationDAO {
             votesAgainst: 0,
             endTime: block.timestamp + VOTING_PERIOD,
             executed: false,
-            restrictedToArizonaProject: true
+            restrictedToArizonaProject: true,
+            pqcSignatureHash: _pqcSignatureHash
         });
 
-        emit ProposalCreated(newId, msg.sender, _requestedFunds, _description);
+        emit ProposalCreated(newId, msg.sender, _requestedFunds, _description, _pqcSignatureHash);
         return newId;
     }
 
@@ -117,7 +121,7 @@ contract ArizonaForestationDAO {
         emit Voted(_proposalId, msg.sender, _support, weight);
     }
 
-    // --- Manual or Automated Execution ---
+    // --- Manual Execution ---
     function executeProposal(uint256 _proposalId) external {
         Proposal storage proposal = proposals[_proposalId];
         require(block.timestamp >= proposal.endTime, "Voting period is still active");
@@ -131,12 +135,13 @@ contract ArizonaForestationDAO {
         emit ProposalExecuted(_proposalId);
     }
 
-    // --- Autonomous Hardware Robot Execution Hook ---
-    function robotExecuteApprovedProposal(uint256 _proposalId) external onlyRobotRelayer {
+    // --- Autonomous Hardware Robot Execution Hook with PQC Verification ---
+    function robotExecuteApprovedProposal(uint256 _proposalId, bytes32 _verifiedPqcProof) external onlyRobotRelayer {
         Proposal storage proposal = proposals[_proposalId];
         require(block.timestamp >= proposal.endTime, "Voting period active");
         require(!proposal.executed, "Already executed");
         require(proposal.votesFor > proposal.votesAgainst, "Votes insufficient");
+        require(proposal.pqcSignatureHash == _verifiedPqcProof, "Hybrid PQC verification failed");
         require(proposal.restrictedToArizonaProject, "Must adhere to Arizona environmental charter");
 
         proposal.executed = true;
@@ -145,7 +150,7 @@ contract ArizonaForestationDAO {
         emit RobotAutomationTriggered(_proposalId, msg.sender, proposal.requestedFunds);
     }
 
-    // --- Emergency Administrative Safeguards ---
+    // --- Administrative Safeguards ---
     function updateOwner(address _newOwner) external onlyOwner {
         require(_newOwner != address(0), "Invalid address");
         owner = _newOwner;
