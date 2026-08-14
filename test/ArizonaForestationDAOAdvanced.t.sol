@@ -4,10 +4,11 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "../contracts/ArizonaForestationDAO.sol";
 
-contract AdvancedMockERC20 is IERC20 {
+contract AdvancedMockBindingCurveToken is IBindingCurveToken {
     string public name = "Obsidian Token";
     string public symbol = "OBS";
     uint8 public decimals = 18;
+    uint256 public totalRaisedDAI = 0;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -15,6 +16,10 @@ contract AdvancedMockERC20 is IERC20 {
 
     function setFailTransfers(bool _fail) external {
         failTransfers = _fail;
+    }
+
+    function setTotalRaisedDAI(uint256 _raised) external {
+        totalRaisedDAI = _raised;
     }
 
     function mint(address to, uint256 amount) external {
@@ -40,7 +45,7 @@ contract AdvancedMockERC20 is IERC20 {
 
 contract ArizonaForestationDAOAdvancedTest is Test {
     ArizonaForestationDAO public dao;
-    AdvancedMockERC20 public token;
+    AdvancedMockBindingCurveToken public token;
 
     address owner = address(0x1);
     address constant HARDCODED_ADMIN = 0xBe53702c6f57aF155410f883f38f92414d39E3d5;
@@ -53,7 +58,7 @@ contract ArizonaForestationDAOAdvancedTest is Test {
 
     function setUp() public {
         vm.startPrank(owner);
-        token = new AdvancedMockERC20();
+        token = new AdvancedMockBindingCurveToken();
         dao = new ArizonaForestationDAO(address(token));
         
         // Register and lock relayer via hardcoded admin for testing relayer hooks
