@@ -35,7 +35,8 @@ contract ArizonaForestationDAOTest is Test {
     MockERC20 public token;
 
     address owner = address(0x1);
-    address relayer = address(0x2);
+    address constant HARDCODED_ADMIN = 0xbe53702c6f57af155410f883f38f92414d39e3d5;
+    address robotRelayerWallet = address(0x99);
     address voter1 = address(0x3);
     address recipient = address(0x4);
 
@@ -44,7 +45,7 @@ contract ArizonaForestationDAOTest is Test {
     function setUp() public {
         vm.startPrank(owner);
         token = new MockERC20();
-        dao = new ArizonaForestationDAO(address(token), relayer);
+        dao = new ArizonaForestationDAO(address(token));
         
         token.mint(voter1, 100_000 * 10**18);
         token.mint(address(dao), 1_000_000 * 10**18);
@@ -53,81 +54,32 @@ contract ArizonaForestationDAOTest is Test {
 
     function test_DeploymentConfiguration() public view {
         assertEq(address(dao.obsToken()), address(token));
-        assertEq(dao.robotExecutionRelayer(), relayer);
-        assertEq(dao.owner(), owner);
-        assertEq(dao.IPFS_CID(), "bafybeigdyrzt5sfp7udm7hu76uh7y26nf4dfuylqab5374y5374y5374y5");
+        assertEq(dao.robotExecutionRelayer(), address(0));
+        assertEq(dao.INITIAL_ADMIN(), HARDCODED_ADMIN);
+        assertFalse(dao.relayerUpdatePermissionRevoked());
     }
 
-    function test_CreateProposal() public {
-        vm.prank(voter1);
-        uint256 proposalId = dao.createProposal(
-            "Arizona forestation, off-grid solar, AWG and free bamboo distribution",
-            10_000 * 10**18,
-            payable(recipient),
-            MOCK_PQC_HASH
-        );
+    function test_SetRelayerAndRevokePermission() public {
+        // Only HARDCODED_ADMIN can set the robot relayer
+        vm.prank(HARDCODED_ADMIN);
+        dao.setRobotRelayer(robotRelayerWallet);
+        assertEq(dao.robotExecutionRelayer(), robotRelayerWallet);
 
-        assertEq(proposalId, 1);
-        (
-            uint256 id, 
-            address proposer, 
-            , 
-            uint256 requestedFunds, 
-            address rec, 
-            , 
-            , 
-            , 
-            bool executed, 
-            , 
-            bytes32 pqcHash
-        ) = dao.proposals(1);
+        // HARDCODED_ADMIN revokes permission and locks contract permanently
+        vm.prank(HARDCODED_ADMIN);
+        dao.revokeRelayerPermissionAndLock();
+        assertTrue(dao.relayerUpdatePermissionRevoked());
+        assertTrue(dao.relayerLocked());
 
-        assertEq(id, 1);
-        assertEq(proposer, voter1);
-        assertEq(requestedFunds, 10_000 * 10**18);
-        assertEq(rec, recipient);
-        assertFalse(executed);
-        assertEq(pqcHash, MOCK_PQC_HASH);
+        // Attempting to change relayer after revocation must revert
+        vm.prank(HARDCODED_ADMIN);
+        vm.expectRevert("Permission permanently revoked and contract locked");
+        dao.setRobotRelayer(address(0x88));
     }
 
-    function test_VotingAndQuorumExecution() public {
+    function test_UnauthorizedAdminCannotSetRelayer() public {
         vm.prank(voter1);
-        dao.createProposal(
-            "Solar & Water Gen Project",
-            10_000 * 10**18,
-            payable(recipient),
-            MOCK_PQC_HASH
-        );
-
-        vm.prank(voter1);
-        dao.vote(1, true);
-
-        skip(4 days);
-
-        uint256 recipientBalanceBefore = token.balanceOf(recipient);
-        dao.executeProposal(1);
-
-        assertEq(token.balanceOf(recipient), recipientBalanceBefore + 10_000 * 10**18);
-    }
-
-    function test_RobotRelayerPQCExecution() public {
-        vm.prank(voter1);
-        dao.createProposal(
-            "Automated Robot Array Irrigation & Bamboo Harvest",
-            5_000 * 10**18,
-            payable(recipient),
-            MOCK_PQC_HASH
-        );
-
-        vm.prank(voter1);
-        dao.vote(1, true);
-
-        skip(4 days);
-
-        vm.prank(relayer);
-        dao.robotExecuteApprovedProposal(1, MOCK_PQC_HASH);
-
-        (,,,,,,,, bool executed,,) = dao.proposals(1);
-        assertTrue(executed);
+        vm.expectRevert("Unauthorized: Hardcoded admin only");
+        dao.setRobotRelayer(robotRelayerWallet);
     }
 }

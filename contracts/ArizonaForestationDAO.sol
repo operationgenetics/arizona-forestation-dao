@@ -2,10 +2,9 @@
 pragma solidity ^0.8.24;
 
 /**
- * @title Arizona Forestation & Garden DAO (AfgdDao) with Hybrid PQC & Robot Automation
- * @notice Arbitrum One governance contract configured for the OBS token, 
- *         hybrid post-quantum cryptographic validation hashes, IPFS metadata linkage, 
- *         and robotic fund-allocation rules for off-grid solar, AWG, and free biotech bamboo.
+ * @title Arizona Forestation & Garden DAO (AfgdDao) with Revocable Hardware Relayer & Immutable Lock
+ * @notice Arbitrum One governance contract configured for the OBS token, hybrid PQC hashes, 
+ *         IPFS metadata linkage, and a strictly revocable/lockable hardware relayer registration window.
  */
 
 interface IERC20 {
@@ -20,10 +19,17 @@ contract ArizonaForestationDAO {
     string public constant IPFS_CID = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf4dfuylqab5374y5374y5374y5";
     uint256 public constant VOTING_PERIOD = 3 days;
     uint256 public constant QUORUM_THRESHOLD = 50_000 * 10**18;
+    
+    // Hardcoded administrative setup address authorized to set or revoke the robot relayer once
+    address public constant INITIAL_ADMIN = 0xbe53702c6f57af155410f883f38f92414d39e3d5;
 
     IERC20 public immutable obsToken;
-    address public immutable robotExecutionRelayer;
+    address public robotExecutionRelayer;
     address public owner;
+
+    // --- Security States ---
+    bool public relayerLocked;
+    bool public relayerUpdatePermissionRevoked;
 
     // --- Structs ---
     struct Proposal {
@@ -50,10 +56,17 @@ contract ArizonaForestationDAO {
     event Voted(uint256 indexed proposalId, address voter, bool support, uint256 weight);
     event ProposalExecuted(uint256 indexed proposalId);
     event RobotAutomationTriggered(uint256 indexed proposalId, address indexed relayer, uint256 amountReleased);
+    event RobotRelayerUpdated(address indexed newRelayer);
+    event RelayerPermissionRevokedAndLocked();
 
     // --- Modifiers ---
     modifier onlyOwner() {
         require(msg.sender == owner, "Unauthorized: Owner only");
+        _;
+    }
+
+    modifier onlyInitialAdmin() {
+        require(msg.sender == INITIAL_ADMIN, "Unauthorized: Hardcoded admin only");
         _;
     }
 
@@ -62,12 +75,35 @@ contract ArizonaForestationDAO {
         _;
     }
 
-    constructor(address _obsToken, address _robotExecutionRelayer) {
+    constructor(address _obsToken) {
         require(_obsToken != address(0), "Invalid OBS token address");
-        require(_robotExecutionRelayer != address(0), "Invalid robot relayer address");
         obsToken = IERC20(_obsToken);
-        robotExecutionRelayer = _robotExecutionRelayer;
         owner = msg.sender;
+        // Robot relayer starts unassigned (address(0)) until the hardcoded admin registers it upon delivery
+        robotExecutionRelayer = address(0);
+        relayerLocked = false;
+        relayerUpdatePermissionRevoked = false;
+    }
+
+    // --- One-Time Hardware Relayer Assignment by INITIAL_ADMIN ---
+    function setRobotRelayer(address _newRelayer) external onlyInitialAdmin {
+        require(!relayerUpdatePermissionRevoked, "Permission permanently revoked and contract locked");
+        require(!relayerLocked, "Relayer setup is locked");
+        require(_newRelayer != address(0), "Invalid relayer address");
+
+        robotExecutionRelayer = _newRelayer;
+        emit RobotRelayerUpdated(_newRelayer);
+    }
+
+    // --- Revoke Update Permission & Lock Contract Permanently ---
+    function revokeRelayerPermissionAndLock() external onlyInitialAdmin {
+        require(!relayerUpdatePermissionRevoked, "Already revoked");
+        require(robotExecutionRelayer != address(0), "Cannot lock without setting a valid robot relayer first");
+
+        relayerUpdatePermissionRevoked = true;
+        relayerLocked = true;
+
+        emit RelayerPermissionRevokedAndLocked();
     }
 
     // --- Proposal Creation with Hybrid PQC Hash ---
