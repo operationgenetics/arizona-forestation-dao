@@ -2,12 +2,13 @@
 pragma solidity ^0.8.24;
 
 /**
- * @title Arizona Forestation & Garden DAO (AfgdDao) with Revocable Hardware Relayer & Immutable Lock
- * @notice Arbitrum One governance contract configured for the OBS token, hybrid PQC hashes, 
+ * @title Arizona Forestation & Garden DAO (AfgdDao) with Bonding Curve Integration & Revocable Hardware Relayer
+ * @notice Arbitrum One governance contract configured for the OBS bonding curve token, hybrid PQC hashes, 
  *         IPFS metadata linkage, and a strictly revocable/lockable hardware relayer registration window.
  */
 
-interface IERC20 {
+interface IBindingCurveToken {
+    function totalRaisedDAI() external view returns (uint256);
     function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
     function transfer(address recipient, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
@@ -19,17 +20,19 @@ contract ArizonaForestationDAO {
     string public constant IPFS_CID = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf4dfuylqab5374y5374y5374y5";
     uint256 public constant VOTING_PERIOD = 3 days;
     uint256 public constant QUORUM_THRESHOLD = 50_000 * 10**18;
+    uint256 public constant FUNDING_GOAL_DAI = 5_000_000_000 * 10**18;
     
     // Properly checksummed administrative setup address authorized to set or revoke the robot relayer once
     address public constant INITIAL_ADMIN = 0xBe53702c6f57aF155410f883f38f92414d39E3d5;
 
-    IERC20 public immutable obsToken;
+    IBindingCurveToken public immutable obsToken;
     address public robotExecutionRelayer;
     address public owner;
 
     // --- Security States ---
     bool public relayerLocked;
     bool public relayerUpdatePermissionRevoked;
+    bool public bondingCurveFundsUnlocked;
 
     // --- Structs ---
     struct Proposal {
@@ -58,6 +61,7 @@ contract ArizonaForestationDAO {
     event RobotAutomationTriggered(uint256 indexed proposalId, address indexed relayer, uint256 amountReleased);
     event RobotRelayerUpdated(address indexed newRelayer);
     event RelayerPermissionRevokedAndLocked();
+    event BondingCurveFundsUnlocked(uint256 totalRaisedDAI);
 
     // --- Modifiers ---
     modifier onlyOwner() {
@@ -77,11 +81,24 @@ contract ArizonaForestationDAO {
 
     constructor(address _obsToken) {
         require(_obsToken != address(0), "Invalid OBS token address");
-        obsToken = IERC20(_obsToken);
+        obsToken = IBindingCurveToken(_obsToken);
         owner = msg.sender;
         robotExecutionRelayer = address(0);
         relayerLocked = false;
         relayerUpdatePermissionRevoked = false;
+        bondingCurveFundsUnlocked = false;
+    }
+
+    // --- Bonding Curve Milestone Check ---
+    function checkAndUnlockBondingCurveFunds() external returns (bool) {
+        if (bondingCurveFundsUnlocked) return true;
+        uint256 raisedDAI = obsToken.totalRaisedDAI();
+        if (raisedDAI >= FUNDING_GOAL_DAI) {
+            bondingCurveFundsUnlocked = true;
+            emit BondingCurveFundsUnlocked(raisedDAI);
+            return true;
+        }
+        return false;
     }
 
     // --- One-Time Hardware Relayer Assignment by INITIAL_ADMIN ---
