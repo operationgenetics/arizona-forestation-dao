@@ -1,11 +1,5 @@
-// SPDX-License-Identifier: AGPLv3
+// SPDX-License-Identifier: AGPLv3-3.0
 pragma solidity ^0.8.24;
-
-/**
- * @title Arizona Forestation & Garden DAO (AfgdDao) with Bonding Curve Integration & Revocable Hardware Relayer
- * @notice Arbitrum One governance contract configured for the OBS bonding curve token, hybrid PQC hashes, 
- *         IPFS metadata linkage, and a strictly revocable/lockable hardware relayer registration window.
- */
 
 interface IBindingCurveToken {
     function totalRaisedDAI() external view returns (uint256);
@@ -15,26 +9,23 @@ interface IBindingCurveToken {
 }
 
 contract ArizonaForestationDAO {
-
-    // --- Constants & Metadata ---
     string public constant IPFS_CID = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf4dfuylqab5374y5374y5374y5";
     uint256 public constant VOTING_PERIOD = 3 days;
-    uint256 public constant QUORUM_THRESHOLD = 50_000 * 10**18;
     uint256 public constant FUNDING_GOAL_DAI = 5_000_000_000 * 10**18;
+    uint256 public constant MONTHLY_LP_GRANT = 100 * 10**18;
+    uint256 public constant PROPOSAL_COST = 50 * 10**18;
     
-    // Properly checksummed administrative setup address authorized to set or revoke the robot relayer once
-    address public constant INITIAL_ADMIN = 0xBe53702c6f57aF155410f883f38f92414d39E3d5;
+    address public constant INITIAL_ADMIN = 0xaF570ce3b32D765b1236635B0f541a7487A1fB8e;
+    address public constant OBS_TOKEN_ADDRESS = 0x2D8760e2877148d239a54952A458710553B2B54b;
 
     IBindingCurveToken public immutable obsToken;
     address public robotExecutionRelayer;
-    address public owner;
+    bytes public robotPqcKey;
 
-    // --- Security States ---
     bool public relayerLocked;
     bool public relayerUpdatePermissionRevoked;
     bool public bondingCurveFundsUnlocked;
 
-    // --- Structs ---
     struct Proposal {
         uint256 id;
         address proposer;
@@ -49,25 +40,20 @@ contract ArizonaForestationDAO {
         bytes32 pqcSignatureHash;
     }
 
-    // --- State Variables ---
     uint256 public proposalCount;
     mapping(uint256 => Proposal) public proposals;
     mapping(uint256 => mapping(address => bool)) public hasVoted;
+    mapping(address => mapping(uint256 => uint256)) public monthlyLPBal;
+    mapping(address => bool) public isMember;
 
-    // --- Events ---
     event ProposalCreated(uint256 indexed proposalId, address proposer, uint256 requestedFunds, string description, bytes32 pqcHash);
     event Voted(uint256 indexed proposalId, address voter, bool support, uint256 weight);
     event ProposalExecuted(uint256 indexed proposalId);
     event RobotAutomationTriggered(uint256 indexed proposalId, address indexed relayer, uint256 amountReleased);
-    event RobotRelayerUpdated(address indexed newRelayer);
+    event RobotRelayerUpdated(address indexed newRelayer, bytes pqcKey);
     event RelayerPermissionRevokedAndLocked();
     event BondingCurveFundsUnlocked(uint256 totalRaisedDAI);
-
-    // --- Modifiers ---
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Unauthorized: Owner only");
-        _;
-    }
+    event MemberJoined(address indexed member, uint256 monthIndex, uint256 grantAmount);
 
     modifier onlyInitialAdmin() {
         require(msg.sender == INITIAL_ADMIN, "Unauthorized: Hardcoded admin only");
@@ -79,17 +65,32 @@ contract ArizonaForestationDAO {
         _;
     }
 
-    constructor(address _obsToken) {
-        require(_obsToken != address(0), "Invalid OBS token address");
-        obsToken = IBindingCurveToken(_obsToken);
-        owner = msg.sender;
+    constructor() {
+        obsToken = IBindingCurveToken(OBS_TOKEN_ADDRESS);
         robotExecutionRelayer = address(0);
         relayerLocked = false;
         relayerUpdatePermissionRevoked = false;
         bondingCurveFundsUnlocked = false;
     }
 
-    // --- Bonding Curve Milestone Check ---
+    function getCurrentMonthIndex() public view returns (uint256) {
+        return block.timestamp / 30 days;
+    }
+
+    function joinDAO() external {
+        uint256 currentMonth = getCurrentMonthIndex();
+        if (!isMember[msg.sender]) {
+            isMember[msg.sender] = true;
+        }
+        monthlyLPBal[msg.sender][currentMonth] = MONTHLY_LP_GRANT;
+        emit MemberJoined(msg.sender, currentMonth, MONTHLY_LP_GRANT);
+    }
+
+    function getVotingPower(address member) public view returns (uint256) {
+        uint256 currentMonth = getCurrentMonthIndex();
+        return monthlyLPBal[member][currentMonth];
+    }
+
     function checkAndUnlockBondingCurveFunds() external returns (bool) {
         if (bondingCurveFundsUnlocked) return true;
         uint256 raisedDAI = obsToken.totalRaisedDAI();
@@ -101,17 +102,16 @@ contract ArizonaForestationDAO {
         return false;
     }
 
-    // --- One-Time Hardware Relayer Assignment by INITIAL_ADMIN ---
-    function setRobotRelayer(address _newRelayer) external onlyInitialAdmin {
+    function setRobotRelayer(address _newRelayer, bytes calldata _newPqcKey) external onlyInitialAdmin {
         require(!relayerUpdatePermissionRevoked, "Permission permanently revoked and contract locked");
         require(!relayerLocked, "Relayer setup is locked");
         require(_newRelayer != address(0), "Invalid relayer address");
 
         robotExecutionRelayer = _newRelayer;
-        emit RobotRelayerUpdated(_newRelayer);
+        robotPqcKey = _newPqcKey;
+        emit RobotRelayerUpdated(_newRelayer, _newPqcKey);
     }
 
-    // --- Revoke Update Permission & Lock Contract Permanently ---
     function revokeRelayerPermissionAndLock() external onlyInitialAdmin {
         require(!relayerUpdatePermissionRevoked, "Already revoked");
         require(robotExecutionRelayer != address(0), "Cannot lock without setting a valid robot relayer first");
@@ -122,7 +122,6 @@ contract ArizonaForestationDAO {
         emit RelayerPermissionRevokedAndLocked();
     }
 
-    // --- Proposal Creation with Hybrid PQC Hash ---
     function createProposal(
         string calldata _description,
         uint256 _requestedFunds,
@@ -130,6 +129,11 @@ contract ArizonaForestationDAO {
         bytes32 _pqcSignatureHash
     ) external returns (uint256) {
         require(_pqcSignatureHash != bytes32(0), "Invalid hybrid PQC signature hash");
+        
+        uint256 currentMonth = getCurrentMonthIndex();
+        require(monthlyLPBal[msg.sender][currentMonth] >= PROPOSAL_COST, "Insufficient monthly LP tokens (needs 50)");
+
+        monthlyLPBal[msg.sender][currentMonth] -= PROPOSAL_COST;
         
         proposalCount++;
         uint256 newId = proposalCount;
@@ -152,15 +156,17 @@ contract ArizonaForestationDAO {
         return newId;
     }
 
-    // --- Voting System ---
     function vote(uint256 _proposalId, bool _support) external {
         Proposal storage proposal = proposals[_proposalId];
         require(block.timestamp < proposal.endTime, "Voting period has closed");
         require(!proposal.executed, "Proposal already executed");
         require(!hasVoted[_proposalId][msg.sender], "Voter has already cast a ballot");
 
-        uint256 weight = obsToken.balanceOf(msg.sender);
-        require(weight > 0, "Zero voting power: Hold OBS tokens to participate");
+        uint256 weight = getVotingPower(msg.sender);
+        require(weight > 0, "Zero voting power: Join DAO and hold monthly LP tokens");
+
+        uint256 currentMonth = getCurrentMonthIndex();
+        monthlyLPBal[msg.sender][currentMonth] = 0;
 
         hasVoted[_proposalId][msg.sender] = true;
 
@@ -173,21 +179,20 @@ contract ArizonaForestationDAO {
         emit Voted(_proposalId, msg.sender, _support, weight);
     }
 
-    // --- Manual Execution ---
     function executeProposal(uint256 _proposalId) external {
         Proposal storage proposal = proposals[_proposalId];
         require(block.timestamp >= proposal.endTime, "Voting period is still active");
         require(!proposal.executed, "Proposal already executed");
         require(proposal.votesFor > proposal.votesAgainst, "Proposal failed majority vote");
-        require((proposal.votesFor + proposal.votesAgainst) >= QUORUM_THRESHOLD, "Quorum not reached");
+        
+        require(bondingCurveFundsUnlocked || this.checkAndUnlockBondingCurveFunds(), "Bonding curve 5B DAI milestone not reached");
 
         proposal.executed = true;
-        require(obsToken.transfer(proposal.recipient, proposal.requestedFunds), "OBS token transfer failed");
+        require(obsToken.transfer(proposal.recipient, proposal.requestedFunds), "OBS token vault transfer failed");
 
         emit ProposalExecuted(_proposalId);
     }
 
-    // --- Autonomous Hardware Robot Execution Hook with PQC Verification ---
     function robotExecuteApprovedProposal(uint256 _proposalId, bytes32 _verifiedPqcProof) external onlyRobotRelayer {
         Proposal storage proposal = proposals[_proposalId];
         require(block.timestamp >= proposal.endTime, "Voting period active");
@@ -195,16 +200,11 @@ contract ArizonaForestationDAO {
         require(proposal.votesFor > proposal.votesAgainst, "Votes insufficient");
         require(proposal.pqcSignatureHash == _verifiedPqcProof, "Hybrid PQC verification failed");
         require(proposal.restrictedToArizonaProject, "Must adhere to Arizona environmental charter");
+        require(bondingCurveFundsUnlocked || this.checkAndUnlockBondingCurveFunds(), "Bonding curve 5B DAI milestone not reached");
 
         proposal.executed = true;
         require(obsToken.transfer(proposal.recipient, proposal.requestedFunds), "Robot token transfer failed");
 
         emit RobotAutomationTriggered(_proposalId, msg.sender, proposal.requestedFunds);
-    }
-
-    // --- Administrative Safeguards ---
-    function updateOwner(address _newOwner) external onlyOwner {
-        require(_newOwner != address(0), "Invalid address");
-        owner = _newOwner;
     }
 }
