@@ -1,3 +1,9 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Updating test/ArizonaForestationDAO.t.sol to etch mock contract to the hardcoded production address..."
+
+cat << 'PROCESSEOF' > test/ArizonaForestationDAO.t.sol
 // SPDX-License-Identifier: AGPLv3-3.0
 pragma solidity ^0.8.24;
 
@@ -210,3 +216,7 @@ contract ArizonaForestationDAOTest is Test {
         dao.setRobotRelayer(address(0x999), hex"87654321");
     }
 }
+PROCESSEOF
+
+echo "Running full Forge test suite..."
+forge test -vvv
