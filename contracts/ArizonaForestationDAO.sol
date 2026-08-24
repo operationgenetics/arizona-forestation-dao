@@ -1,33 +1,42 @@
-// SPDX-License-Identifier: AGPLv3-3.0
-pragma solidity ^0.8.24;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
-interface IBindingCurveToken {
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+interface IObscuraToken {
     function totalRaisedDAI() external view returns (uint256);
-    function transfer(address recipient, uint256 amount) external returns (bool);
-    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
+    function verifyHybridSignature(
+        address signer,
+        bytes32 messageHash,
+        bytes calldata dilithiumSignature,
+        bytes calldata ed25519Signature
+    ) external view returns (bool);
 }
 
+/**
+ * @title Arizona Forestation & Sustainable Off-Grid Ecosystem DAO
+ * @notice Fully autonomous off-grid DAO governing solar/water infrastructure, biotech/environmentally 
+ *         safe plant cultivation, bamboo maximum-yield community distribution, and Roomie Robot MCU security.
+ */
 contract ArizonaForestationDAO {
-    address public immutable INITIAL_ADMIN = 0xaF570ce3b32D765b1236635B0f541a7487A1fB8e;
+    // --- Constants & Hardcoded Addresses ---
     address public constant OBS_TOKEN_ADDRESS = 0x2D8760e2877148d239a54952A458710553B2B54b;
+    address public constant INITIAL_ADMIN = 0xaF570ce3b32D765b1236635B0f541a7487A1fB8e;
     
-    uint256 public constant FUNDING_GOAL_DAI = 5_000_000_000 * 10**18;
-    uint256 public constant MONTHLY_LP_GRANT = 100 * 10**18;
-    uint256 public constant PROPOSAL_COST = 50 * 10**18;
+    uint256 public constant BONDING_CURVE_GOAL = 5_000_000_000 * 10**18; // 5 Billion DAI
+    uint256 public constant PROPOSAL_THRESHOLD_LP = 50 * 10**18;      // 50 LP tokens required to propose
+    uint256 public constant QUORUM_THRESHOLD_LP = 100 * 10**18;     // 100 LP votes required for quorum
     uint256 public constant VOTING_PERIOD = 3 days;
-    uint256 public constant TIMELOCK_DELAY = 1 days;
+    uint256 public constant MILESTONES_COUNT = 3;                     // Split into 3 tranches (every 2 months)
+    uint256 public constant MILESTONE_INTERVAL = 60 days;             // Roomie Robot strict MCU pacing
 
-    address public robotExecutionRelayer;
-    bytes public robotPqcPublicKey;
-    bool public relayerUpdatePermissionRevoked;
-    bool public relayerLocked;
+    // --- State Variables ---
+    address public roomieRobotRelayer; // Hardware MCU Public Key / Relayer Address
+    bool public relayerUpdatePermissionRevoked = false;
+    bool public bondingCurveFundsUnlocked = false;
 
-    struct Member {
-        uint256 joinTimestamp;
-        uint256 lastGrantTimestamp;
-        bool active;
-    }
+    // Monthly LP tracking: mapping(monthId => mapping(account => lpBalance))
+    mapping(uint256 => mapping(address => uint256)) public monthlyLpBalances;
 
     struct Proposal {
         uint256 id;
@@ -35,128 +44,155 @@ contract ArizonaForestationDAO {
         string description;
         uint256 requestedFunds;
         address payable recipient;
-        uint256 votesFor;
-        uint256 votesAgainst;
-        uint256 endTime;
-        uint256 executionTime;
+        bytes32 pqcProofHash;
+        bool isBambooOrForestationMandate;
+        uint256 startTime;
+        uint256 yesVotes;
+        uint256 noVotes;
         bool executed;
-        bytes32 pqcHash;
+        uint256 lastMilestoneReleaseTime;
+        uint256 milestonesReleased;
+        mapping(address => bool) voted;
     }
 
-    mapping(address => Member) public members;
     mapping(uint256 => Proposal) public proposals;
-    mapping(uint256 => mapping(address => bool)) public hasVoted;
     uint256 public proposalCount;
 
-    event MemberJoined(address indexed member, uint256 monthIndex, uint256 grantAmount);
-    event ProposalCreated(uint256 indexed proposalId, address indexed proposer, uint256 requestedFunds, string description, bytes32 pqcHash);
-    event Voted(uint256 indexed proposalId, address indexed voter, bool support, uint256 weight);
-    event ProposalExecuted(uint256 indexed proposalId);
-    event RobotRelayerUpdated(address indexed newRelayer);
+    // --- Events ---
+    event RoomieRobotRelayerUpdated(address indexed newRelayer);
     event RelayerPermissionRevokedAndLocked();
+    event BondingCurveUnlocked(uint256 totalRaised);
+    event ProposalCreated(uint256 indexed proposalId, address indexed proposer, uint256 requestedFunds, string description, bytes32 pqcHash);
+    event Voted(uint256 indexed proposalId, address indexed voter, bool support, uint256 weight, uint256 monthId);
+    event MilestoneExecuted(uint256 indexed proposalId, uint256 milestoneIndex, uint256 amountReleased, address recipient);
 
     modifier onlyAdmin() {
-        require(msg.sender == INITIAL_ADMIN, "Only admin");
+        require(msg.sender == INITIAL_ADMIN, "ArizonaForestationDAO: Caller is not the hardcoded admin");
         _;
     }
 
-    function setRobotRelayer(address _relayer, bytes calldata _pqcKey) external onlyAdmin {
-        require(!relayerLocked, "Permission permanently revoked and contract locked");
-        robotExecutionRelayer = _relayer;
-        robotPqcPublicKey = _pqcKey;
-        emit RobotRelayerUpdated(_relayer);
+    constructor() {}
+
+    function setupRoomieRobotAndLock(address _roomieRobotRelayer) external onlyAdmin {
+        require(!relayerUpdatePermissionRevoked, "ArizonaForestationDAO: Relayer updates permanently locked");
+        roomieRobotRelayer = _roomieRobotRelayer;
+        emit RoomieRobotRelayerUpdated(_roomieRobotRelayer);
     }
 
     function revokeRelayerPermissionAndLock() external onlyAdmin {
-        require(!relayerUpdatePermissionRevoked, "Already revoked");
+        require(!relayerUpdatePermissionRevoked, "ArizonaForestationDAO: Already revoked");
         relayerUpdatePermissionRevoked = true;
-        relayerLocked = true;
         emit RelayerPermissionRevokedAndLocked();
     }
 
-    function joinDAO() external {
-        Member storage member = members[msg.sender];
-        if (!member.active) {
-            member.joinTimestamp = block.timestamp;
-            member.active = true;
+    function checkAndUnlockBondingCurveFunds() public {
+        if (!bondingCurveFundsUnlocked) {
+            uint256 raised = IObscuraToken(OBS_TOKEN_ADDRESS).totalRaisedDAI();
+            if (raised >= BONDING_CURVE_GOAL) {
+                bondingCurveFundsUnlocked = true;
+                emit BondingCurveUnlocked(raised);
+            }
         }
-        member.lastGrantTimestamp = block.timestamp;
-        emit MemberJoined(msg.sender, block.timestamp / 30 days, MONTHLY_LP_GRANT);
     }
 
-    function isMember(address account) public view returns (bool) {
-        Member memory member = members[account];
-        if (!member.active) return false;
-        if (block.timestamp > member.lastGrantTimestamp + 30 days) return false;
-        return true;
-    }
-
-    function getVotingPower(address account) public view returns (uint256) {
-        if (!isMember(account)) return 0;
-        return MONTHLY_LP_GRANT;
+    function recordMonthlyLpBalance(address account, uint256 lpAmount) external onlyAdmin {
+        uint256 currentMonth = block.timestamp / 30 days;
+        monthlyLpBalances[currentMonth][account] = lpAmount;
     }
 
     function createProposal(
-        string calldata description,
+        string memory description,
         uint256 requestedFunds,
         address payable recipient,
-        bytes32 pqcHash
+        bytes32 pqcProofHash,
+        bool isBambooOrForestationMandate
     ) external returns (uint256) {
-        require(isMember(msg.sender), "Must be active DAO member");
-        require(getVotingPower(msg.sender) >= PROPOSAL_COST, "Insufficient LP balance for proposal fee");
-        
+        uint256 currentMonth = block.timestamp / 30 days;
+        require(monthlyLpBalances[currentMonth][msg.sender] >= PROPOSAL_THRESHOLD_LP, "Insufficient monthly LP balance (50 LP required)");
+        require(requestedFunds > 0, "Requested funds must be > 0");
+
         proposalCount++;
-        proposals[proposalCount] = Proposal({
-            id: proposalCount,
-            proposer: msg.sender,
-            description: description,
-            requestedFunds: requestedFunds,
-            recipient: recipient,
-            votesFor: 0,
-            votesAgainst: 0,
-            endTime: block.timestamp + VOTING_PERIOD,
-            executionTime: block.timestamp + VOTING_PERIOD + TIMELOCK_DELAY,
-            executed: false,
-            pqcHash: pqcHash
-        });
-        emit ProposalCreated(proposalCount, msg.sender, requestedFunds, description, pqcHash);
+        Proposal storage p = proposals[proposalCount];
+        p.id = proposalCount;
+        p.proposer = msg.sender;
+        p.description = description;
+        p.requestedFunds = requestedFunds;
+        p.recipient = recipient;
+        p.pqcProofHash = pqcProofHash;
+        p.isBambooOrForestationMandate = isBambooOrForestationMandate;
+        p.startTime = block.timestamp;
+
+        emit ProposalCreated(proposalCount, msg.sender, requestedFunds, description, pqcProofHash);
         return proposalCount;
     }
 
     function vote(uint256 proposalId, bool support) external {
-        require(isMember(msg.sender), "Must be active DAO member");
-        Proposal storage proposal = proposals[proposalId];
-        require(block.timestamp < proposal.endTime, "Voting has ended");
-        require(!hasVoted[proposalId][msg.sender], "Voter has already cast a ballot");
+        Proposal storage p = proposals[proposalId];
+        require(block.timestamp <= p.startTime + VOTING_PERIOD, "Voting period ended");
+        require(!p.voted[msg.sender], "Already voted");
 
-        uint256 weight = getVotingPower(msg.sender);
-        require(weight > 0, "No voting power");
+        uint256 currentMonth = p.startTime / 30 days;
+        uint256 weight = monthlyLpBalances[currentMonth][msg.sender];
+        require(weight > 0, "No active LP voting weight for this month");
 
-        hasVoted[proposalId][msg.sender] = true;
+        p.voted[msg.sender] = true;
         if (support) {
-            proposal.votesFor += weight;
+            p.yesVotes += weight;
         } else {
-            proposal.votesAgainst += weight;
+            p.noVotes += weight;
         }
-        emit Voted(proposalId, msg.sender, support, weight);
-    }
 
-    function checkAndUnlockBondingCurveFunds() public view returns (bool) {
-        uint256 raised = IBindingCurveToken(OBS_TOKEN_ADDRESS).totalRaisedDAI();
-        return raised >= FUNDING_GOAL_DAI;
+        emit Voted(proposalId, msg.sender, support, weight, currentMonth);
     }
 
     function executeProposal(uint256 proposalId) external {
-        Proposal storage proposal = proposals[proposalId];
-        require(!proposal.executed, "Proposal already executed");
-        require(block.timestamp >= proposal.executionTime, "Timelock not expired");
-        require(proposal.votesFor > proposal.votesAgainst, "Proposal failed");
-        require(checkAndUnlockBondingCurveFunds(), "Funding goal not reached");
+        checkAndUnlockBondingCurveFunds();
+        require(bondingCurveFundsUnlocked, "Bonding curve 5B DAI goal not yet reached");
 
-        proposal.executed = true;
-        bool success = IBindingCurveToken(OBS_TOKEN_ADDRESS).transfer(proposal.recipient, proposal.requestedFunds);
-        require(success, "Token transfer failed");
-        emit ProposalExecuted(proposalId);
+        Proposal storage p = proposals[proposalId];
+        require(block.timestamp > p.startTime + VOTING_PERIOD, "Voting still active");
+        require(!p.executed, "Already executed");
+        require(p.yesVotes + p.noVotes >= QUORUM_THRESHOLD_LP, "Quorum not met (100 LP required)");
+        require(p.yesVotes > p.noVotes, "Did not pass majority");
+
+        p.executed = true;
+        p.lastMilestoneReleaseTime = block.timestamp;
+    }
+
+    function roomieRobotExecuteApprovedProposal(
+        uint256 proposalId,
+        bytes32 messageHash,
+        bytes calldata dilithiumSignature,
+        bytes calldata ed25519Signature
+    ) external {
+        require(msg.sender == roomieRobotRelayer, "Caller is not Roomie Robot relayer/MCU");
+        
+        bool isValidPqc = IObscuraToken(OBS_TOKEN_ADDRESS).verifyHybridSignature(
+            INITIAL_ADMIN,
+            messageHash,
+            dilithiumSignature,
+            ed25519Signature
+        );
+        require(isValidPqc, "Invalid Hybrid PQC & Biometric signature");
+
+        Proposal storage p = proposals[proposalId];
+        require(p.executed, "Proposal not yet executed by DAO");
+        require(p.milestonesReleased < MILESTONES_COUNT, "All milestone tranches completed");
+
+        if (p.milestonesReleased > 0) {
+            require(
+                block.timestamp >= p.lastMilestoneReleaseTime + MILESTONE_INTERVAL,
+                "Roomie Robot Pacing: Must wait 2 months between tranches"
+            );
+        }
+
+        p.milestonesReleased++;
+        p.lastMilestoneReleaseTime = block.timestamp;
+
+        uint256 trancheAmount = p.requestedFunds / MILESTONES_COUNT;
+        bool success = IERC20(OBS_TOKEN_ADDRESS).transfer(p.recipient, trancheAmount);
+        require(success, "DAO vault token transfer failed");
+
+        emit MilestoneExecuted(proposalId, p.milestonesReleased, trancheAmount, p.recipient);
     }
 }
-
