@@ -159,3 +159,4 @@ contract ArizonaForestationDAO {
         emit ProposalExecuted(proposalId);
     }
 }
+
