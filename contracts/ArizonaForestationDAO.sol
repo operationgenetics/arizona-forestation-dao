@@ -36,6 +36,7 @@ contract ArizonaForestationDAO {
     bool public bondingCurveFundsUnlocked = false;
 
     // Monthly LP tracking: mapping(monthId => mapping(account => lpBalance))
+    // LP tokens automatically expire at the end of each month if not used or if new month rolls over.
     mapping(uint256 => mapping(address => uint256)) public monthlyLpBalances;
 
     struct Proposal {
@@ -73,18 +74,27 @@ contract ArizonaForestationDAO {
 
     constructor() {}
 
+    /**
+     * @notice Sets up or updates the Roomie Robot MCU relayer address. Can be updated once hardware arrives.
+     */
     function setupRoomieRobotAndLock(address _roomieRobotRelayer) external onlyAdmin {
         require(!relayerUpdatePermissionRevoked, "ArizonaForestationDAO: Relayer updates permanently locked");
         roomieRobotRelayer = _roomieRobotRelayer;
         emit RoomieRobotRelayerUpdated(_roomieRobotRelayer);
     }
 
+    /**
+     * @notice Revokes relayer updating permissions permanently to make the contract fully immutable.
+     */
     function revokeRelayerPermissionAndLock() external onlyAdmin {
         require(!relayerUpdatePermissionRevoked, "ArizonaForestationDAO: Already revoked");
         relayerUpdatePermissionRevoked = true;
         emit RelayerPermissionRevokedAndLocked();
     }
 
+    /**
+     * @notice Checks if Obscura token bonding curve has hit 5 Billion DAI raised to unlock vault funds.
+     */
     function checkAndUnlockBondingCurveFunds() public {
         if (!bondingCurveFundsUnlocked) {
             uint256 raised = IObscuraToken(OBS_TOKEN_ADDRESS).totalRaisedDAI();
@@ -95,11 +105,17 @@ contract ArizonaForestationDAO {
         }
     }
 
+    /**
+     * @notice Records monthly LP token weights. LP tokens expire monthly.
+     */
     function recordMonthlyLpBalance(address account, uint256 lpAmount) external onlyAdmin {
         uint256 currentMonth = block.timestamp / 30 days;
         monthlyLpBalances[currentMonth][account] = lpAmount;
     }
 
+    /**
+     * @notice Creates an off-grid solar, water, forestation, or free community bamboo distribution proposal.
+     */
     function createProposal(
         string memory description,
         uint256 requestedFunds,
@@ -126,6 +142,9 @@ contract ArizonaForestationDAO {
         return proposalCount;
     }
 
+    /**
+     * @notice Votes on proposals using 1:1 LP tokens to votes ratio for the active month.
+     */
     function vote(uint256 proposalId, bool support) external {
         Proposal storage p = proposals[proposalId];
         require(block.timestamp <= p.startTime + VOTING_PERIOD, "Voting period ended");
@@ -133,7 +152,7 @@ contract ArizonaForestationDAO {
 
         uint256 currentMonth = p.startTime / 30 days;
         uint256 weight = monthlyLpBalances[currentMonth][msg.sender];
-        require(weight > 0, "No active LP voting weight for this month");
+        require(weight > 0, "No active LP voting weight for this month (expired or zero)");
 
         p.voted[msg.sender] = true;
         if (support) {
@@ -145,6 +164,9 @@ contract ArizonaForestationDAO {
         emit Voted(proposalId, msg.sender, support, weight, currentMonth);
     }
 
+    /**
+     * @notice Executes proposal outcome after voting period if quorum (100 LP) and majority rules are met.
+     */
     function executeProposal(uint256 proposalId) external {
         checkAndUnlockBondingCurveFunds();
         require(bondingCurveFundsUnlocked, "Bonding curve 5B DAI goal not yet reached");
@@ -159,6 +181,10 @@ contract ArizonaForestationDAO {
         p.lastMilestoneReleaseTime = block.timestamp;
     }
 
+    /**
+     * @notice Roomie Robot MCU automated execution hook enforcing strict 2-month milestone pacing 
+     *         and hybrid PQC + biometric authorization signed by admin.
+     */
     function roomieRobotExecuteApprovedProposal(
         uint256 proposalId,
         bytes32 messageHash,
@@ -182,7 +208,7 @@ contract ArizonaForestationDAO {
         if (p.milestonesReleased > 0) {
             require(
                 block.timestamp >= p.lastMilestoneReleaseTime + MILESTONE_INTERVAL,
-                "Roomie Robot Pacing: Must wait 2 months between tranches"
+                "Roomie Robot Pacing: Must wait 2 months between tranches to protect token stability"
             );
         }
 
@@ -195,4 +221,7 @@ contract ArizonaForestationDAO {
 
         emit MilestoneExecuted(proposalId, p.milestonesReleased, trancheAmount, p.recipient);
     }
+
+    // Fallback to receive OBS tokens into vault
+    receive() external payable {}
 }
