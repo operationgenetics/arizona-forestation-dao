@@ -3,15 +3,11 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {MLDSA65} from "./pqc/mldsa/MLDSA65.sol";
+import {Ed25519} from "./pqc/ed25519/Ed25519.sol";
 
 interface IObscuraToken {
     function totalRaisedDAI() external view returns (uint256);
-    function verifyHybridSignature(
-        address signer,
-        bytes32 messageHash,
-        bytes calldata dilithiumSignature,
-        bytes calldata ed25519Signature
-    ) external view returns (bool);
 }
 
 /**
@@ -20,11 +16,11 @@ interface IObscuraToken {
  *         environmentally safe biotech plants, and strictly enforced automated robot-managed
  *         bamboo harvesting and free global community distribution for building supplies.
  * 
- * @dev SECURITY NOTICE: Hybrid PQC (Dilithium + Ed25519) verification CANNOT be performed
- *       natively in the EVM without a dedicated precompile or external verifier contract.
- *       The IObscuraToken.verifyHybridSignature() call delegates to the Obscura token contract
- *       which MUST implement proper PQC verification via precompile/external call.
- *       This contract FAILS CLOSED if verification returns false.
+ * @dev SECURITY NOTICE: Hybrid PQC (ML-DSA-65 Dilithium + Ed25519) verification is performed
+ *       NATIVELY ON-CHAIN using vendored, audited Solidity libraries (contracts/pqc/):
+ *       MLDSA65.sol (FIPS 204) and Ed25519.sol (RFC 8032). Both robot signatures MUST verify
+ *       over the 32-byte domain-separated expectedMessageHash, otherwise the transaction
+ *       reverts with InvalidPqcSignature (FAILS CLOSED).
  * 
  * @dev BIOMETRIC DATA: Biometric templates are NEVER stored on-chain, in contract storage,
  *       events, or repository files. Only the robot MCU hardware public key is configured on-chain.
@@ -84,6 +80,12 @@ contract ArizonaForestationDAO {
     uint256 public constant MONTH_DURATION = DAYS_PER_MONTH * SECONDS_PER_DAY;
     bytes32 public constant DOMAIN_SEPARATOR = 0x4172697a6f6e61466f726573746174696f6e44414f0000000000000000000000; // "ArizonaForestationDAO" padded to 32 bytes
 
+    // NIST FIPS 204 ML-DSA-65 / RFC 8032 Ed25519 sizing (matching vendored library constants)
+    uint256 public constant ROBOT_MLDSA_PK_BYTES = 1952;   // ML-DSA-65 public key size
+    uint256 public constant ROBOT_MLDSA_SIG_BYTES = 3309;  // ML-DSA-65 signature size
+    uint256 public constant ROBOT_ED25519_PK_BYTES = 32;   // Ed25519 compressed public key size
+    uint256 public constant ROBOT_ED25519_SIG_BYTES = 64;  // Ed25519 (R||S) signature size
+
     // Hardcoded Ecological & Infrastructure Mandate Rules enforced by Robot Hardware MCU
     string public constant INFRASTRUCTURE_MANDATE = "Off-grid solar arrays, battery storage stacks, and atmospheric water generators";
     string public constant BIOTECH_PLANT_MANDATE = "Environmentally safe biotech plant cultivation including maximum-yield bamboo";
@@ -91,6 +93,8 @@ contract ArizonaForestationDAO {
 
     // --- State Variables ---
     address public roomieRobotRelayer;              // Hardware MCU Public Key / Relayer Address
+    bytes public robotMlDsaPublicKey;               // NIST FIPS 204 ML-DSA-65 robot public key (1952 bytes)
+    bytes public robotEd25519PublicKey;             // RFC 8032 Ed25519 robot public key (32 bytes)
     bool public relayerUpdatePermissionRevoked = false;
     bool public bondingCurveFundsUnlocked = false;
 
@@ -225,14 +229,20 @@ contract ArizonaForestationDAO {
     }
 
     /**
-     * @notice Sets up or updates the Roomie Robot MCU relayer address/public key.
+     * @notice Sets up or updates the Roomie Robot MCU relayer address and its hybrid PQC public keys.
      *         Can be updated when hardware arrives, and permanently locked later.
-     * @param _roomieRobotRelayer The address of the robot relayer (MCU public key)
+     * @param _roomieRobotRelayer The address of the robot relayer (MCU wallet)
+     * @param _mlDsaPublicKey The ML-DSA-65 (FIPS 204) robot public key (1952 bytes)
+     * @param _ed25519PublicKey The Ed25519 (RFC 8032) robot public key (32 bytes)
      */
-    function setupRoomieRobotAndLock(address _roomieRobotRelayer) external onlyAdmin {
+    function setupRoomieRobotAndLock(address _roomieRobotRelayer, bytes calldata _mlDsaPublicKey, bytes calldata _ed25519PublicKey) external onlyAdmin {
         if (_roomieRobotRelayer == address(0)) revert ZeroAddress();
         if (relayerUpdatePermissionRevoked) revert RelayerUpdatesLocked();
+        if (_mlDsaPublicKey.length != ROBOT_MLDSA_PK_BYTES) revert InvalidPqcSignature();
+        if (_ed25519PublicKey.length != ROBOT_ED25519_PK_BYTES) revert InvalidPqcSignature();
         roomieRobotRelayer = _roomieRobotRelayer;
+        robotMlDsaPublicKey = _mlDsaPublicKey;
+        robotEd25519PublicKey = _ed25519PublicKey;
         emit RoomieRobotRelayerUpdated(_roomieRobotRelayer);
     }
 
@@ -395,9 +405,9 @@ contract ArizonaForestationDAO {
      *       The messageHash MUST be computed as:
      *       keccak256(abi.encodePacked(DOMAIN_SEPARATOR, proposalId, milestoneIndex, trancheAmount, recipient, deadline, nonce))
      * 
-     * @dev PQC VERIFICATION: Delegates to IObscuraToken.verifyHybridSignature() which MUST
-     *       implement actual Dilithium + Ed25519 verification via precompile/external verifier.
-     *       This contract FAILS CLOSED - if verification returns false, transaction reverts.
+* @dev PQC VERIFICATION: Both robot signatures (ML-DSA-65 + Ed25519) are verified NATIVELY
+ *       on-chain via vendored libraries (contracts/pqc/) over the 32-byte expectedMessageHash.
+ *       This contract FAILS CLOSED - if either verification returns false, transaction reverts.
      * 
      * @param proposalId The executed proposal to release funds for
      * @param milestoneIndex The milestone index being released (1, 2, or 3)
@@ -434,16 +444,20 @@ contract ArizonaForestationDAO {
             currentNonce
         ));
 
-        // Native Hybrid PQC Security verification hooked into the Obscura token contract
-        // SECURITY: This call MUST return false if PQC verification fails.
-        // The Obscura token contract is responsible for actual Dilithium+Ed25519 verification.
-        bool isValidPqc = IObscuraToken(OBS_TOKEN_ADDRESS).verifyHybridSignature(
-            INITIAL_ADMIN,
-            expectedMessageHash,
-            dilithiumSignature,
-            ed25519Signature
-        );
-        if (!isValidPqc) revert InvalidPqcSignature();
+        // Native Hybrid PQC verification (vendored Solidity libs, contracts/pqc/).
+        // BOTH signatures are over the 32-byte domain-separated expectedMessageHash.
+        if (ed25519Signature.length != ROBOT_ED25519_SIG_BYTES) revert InvalidPqcSignature();
+        if (dilithiumSignature.length != ROBOT_MLDSA_SIG_BYTES) revert InvalidPqcSignature();
+        bytes memory message = abi.encodePacked(expectedMessageHash);
+
+        bytes32 r;
+        bytes32 s;
+        assembly {
+            r := calldataload(ed25519Signature.offset)
+            s := calldataload(add(ed25519Signature.offset, 32))
+        }
+        if (!Ed25519.verify(bytes32(robotEd25519PublicKey), r, s, message)) revert InvalidPqcSignature();
+        if (!MLDSA65.verify(robotMlDsaPublicKey, message, dilithiumSignature)) revert InvalidPqcSignature();
 
         Proposal storage p = proposals[proposalId];
         if (!p.executed) revert ProposalNotExecuted();

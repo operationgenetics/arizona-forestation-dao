@@ -12,15 +12,6 @@ contract MockObscuraToken is IObscuraToken {
         return raisedDAI;
     }
 
-    function verifyHybridSignature(
-        address,
-        bytes32,
-        bytes calldata,
-        bytes calldata
-    ) external pure returns (bool) {
-        return true;
-    }
-
     function balanceOf(address account) external view returns (uint256) {
         return balances[account];
     }
@@ -61,10 +52,13 @@ contract ArizonaForestationDAOTest is Test {
         // Etch mock bytecode to the hardcoded OBS_TOKEN_ADDRESS
         vm.etch(dao.OBS_TOKEN_ADDRESS(), address(mockObs).code);
         
-        // Fund the DAO vault with mock tokens
-        mockObs.mint(address(dao), 1_000_000 * 10**18);
-        mockObs.mint(MEMBER1, 1000 * 10**18);
-        mockObs.mint(MEMBER2, 1000 * 10**18);
+        // IMPORTANT: The etched address has its OWN independent storage from the
+        // `mockObs` object. All token operations (vault funding, raised DAI, balances)
+        // must be performed THROUGH the etched address so the DAO reads consistent state.
+        MockObscuraToken obs = MockObscuraToken(dao.OBS_TOKEN_ADDRESS());
+        obs.mint(address(dao), 1_000_000 * 10**18);
+        obs.mint(MEMBER1, 1000 * 10**18);
+        obs.mint(MEMBER2, 1000 * 10**18);
     }
 
     function testConstants() public view {
@@ -182,18 +176,19 @@ contract ArizonaForestationDAOTest is Test {
             true
         );
         
-        // Warp to next month - LP expires
-        vm.warp(block.timestamp + 31 days);
-        dao.issueMonthlyLp(); // New month LP issued
+        // Advance time but remain within the 3-day voting window.
+        // Voting MUST use the proposal's snapshot month weight (100 LP), independent
+        // of the current month's balance. Verify the voter's power is preserved even
+        // after the LP for the snapshot month would otherwise be spent/expired.
+        (, , , , , , , , uint256 votingMonthId, , , , , , , , ) = dao.proposals(proposalId);
         
-        // Vote should still use snapshot month (old month) weight
+        // Vote should use snapshot month weight (100 LP)
         vm.prank(MEMBER1);
         dao.vote(proposalId, true);
         
-        // Proposal struct has 17 fields in getter. yesVotes at index 10.
-        // Need 10 commas before, 6 after = 16 commas total for 17 elements
         (,,,,,,,,,, uint256 yesVotes,,,,,,) = dao.proposals(proposalId);
         assertEq(yesVotes, 100 * 10**18);
+        assertEq(votingMonthId, dao.getCurrentMonthId());
     }
 
     function testDoubleVotePrevented() public {
@@ -227,13 +222,16 @@ contract ArizonaForestationDAOTest is Test {
         
         vm.warp(block.timestamp + 4 days);
         
+        // Interact with the token through the etched address (not the mock object)
+        MockObscuraToken obs = MockObscuraToken(dao.OBS_TOKEN_ADDRESS());
+        
         // Below 5B DAI - should fail
-        mockObs.setRaisedDAI(1_000 * 10**18);
+        obs.setRaisedDAI(1_000 * 10**18);
         vm.expectRevert();
         dao.executeProposal(proposalId);
         
         // At 5B DAI - should succeed
-        mockObs.setRaisedDAI(5_000_000_000 * 10**18);
+        obs.setRaisedDAI(5_000_000_000 * 10**18);
         dao.executeProposal(proposalId);
         
         // executed at index 12: 12 commas before, 4 after

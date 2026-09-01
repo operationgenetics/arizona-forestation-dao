@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "../contracts/ArizonaForestationDAO.sol";
+import "./RobotPqcVectors.sol";
 
 contract MockObscuraToken is IObscuraToken {
     uint256 public raisedDAI = 6_000_000_000 * 10**18;
@@ -10,15 +11,6 @@ contract MockObscuraToken is IObscuraToken {
 
     function totalRaisedDAI() external view returns (uint256) {
         return raisedDAI;
-    }
-
-    function verifyHybridSignature(
-        address,
-        bytes32,
-        bytes calldata,
-        bytes calldata
-    ) external pure returns (bool) {
-        return true;
     }
 
     function balanceOf(address account) external view returns (uint256) {
@@ -67,7 +59,7 @@ contract ArizonaForestationDAOComprehensiveTest is Test {
     function testFullLifecycleAndRoomieRobotAutomation() public {
         // 1. Setup Roomie Robot Relayer as Admin
         vm.prank(ADMIN);
-        dao.setupRoomieRobotAndLock(RELAYER);
+        dao.setupRoomieRobotAndLock(RELAYER, RobotPqcVectors.MLDSA_PK, RobotPqcVectors.ED25519_PK);
         assertEq(dao.roomieRobotRelayer(), RELAYER);
 
         // 2. Revoke relayer update permissions to make immutable
@@ -78,7 +70,7 @@ contract ArizonaForestationDAOComprehensiveTest is Test {
         // 3. Attempt to update after revocation should fail
         vm.prank(ADMIN);
         vm.expectRevert();
-        dao.setupRoomieRobotAndLock(address(0x999));
+        dao.setupRoomieRobotAndLock(address(0x999), RobotPqcVectors.MLDSA_PK, RobotPqcVectors.ED25519_PK);
 
         // 4. Voter joins DAO and receives monthly LP
         vm.prank(VOTER);

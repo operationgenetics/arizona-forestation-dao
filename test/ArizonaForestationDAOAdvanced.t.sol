@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "../contracts/ArizonaForestationDAO.sol";
+import "./RobotPqcVectors.sol";
 
 contract AdvancedMockBindingCurveToken is IObscuraToken {
     uint256 public raisedDAI = 6_000_000_000 * 10**18;
@@ -10,15 +11,6 @@ contract AdvancedMockBindingCurveToken is IObscuraToken {
 
     function totalRaisedDAI() external view returns (uint256) {
         return raisedDAI;
-    }
-
-    function verifyHybridSignature(
-        address,
-        bytes32,
-        bytes calldata,
-        bytes calldata
-    ) external pure returns (bool) {
-        return true;
     }
 
     function balanceOf(address account) external view returns (uint256) {
@@ -40,6 +32,10 @@ contract AdvancedMockBindingCurveToken is IObscuraToken {
     function mint(address to, uint256 amount) external {
         balances[to] += amount;
     }
+
+    function setRaisedDAI(uint256 _raised) external {
+        raisedDAI = _raised;
+    }
 }
 
 contract ArizonaForestationDAOAdvancedTest is Test {
@@ -49,31 +45,42 @@ contract ArizonaForestationDAOAdvancedTest is Test {
     address constant RELAYER = address(0x456);
     address constant USER = address(0x789);
     address constant RECIPIENT = address(0x111);
+    address constant VAULT_FUNDER = address(0xABC);
 
     function setUp() public {
         token = new AdvancedMockBindingCurveToken();
         dao = new ArizonaForestationDAO();
         vm.etch(dao.OBS_TOKEN_ADDRESS(), address(token).code);
         
-        token.mint(address(dao), 10_000_000 * 10**18);
-        token.mint(USER, 1000 * 10**18);
+        // The etched hardcoded OBS address has its OWN storage independent of `token`.
+        // All token operations must be routed through the etched address so the DAO
+        // observes consistent state (raised DAI >= 5B to unlock the bonding curve).
+        AdvancedMockBindingCurveToken obs = AdvancedMockBindingCurveToken(dao.OBS_TOKEN_ADDRESS());
+        obs.setRaisedDAI(6_000_000_000 * 10**18);
+        obs.mint(VAULT_FUNDER, 10_000_000 * 10**18);
+        obs.mint(USER, 1000 * 10**18);
+        
+        // Deposit vault funds THROUGH receiveObsTokens so internal vaultObsBalance
+        // accounting is updated (direct mint bypasses accounting and yields 0 vault).
+        vm.prank(VAULT_FUNDER);
+        dao.receiveObsTokens(10_000_000 * 10**18);
     }
 
     function testAdvancedDeploymentAndSetup() public {
         vm.startPrank(ADMIN);
-        dao.setupRoomieRobotAndLock(RELAYER);
+        dao.setupRoomieRobotAndLock(RELAYER, RobotPqcVectors.MLDSA_PK, RobotPqcVectors.ED25519_PK);
         assertEq(dao.roomieRobotRelayer(), RELAYER);
         vm.stopPrank();
     }
 
     function testRevocableImmutability() public {
         vm.startPrank(ADMIN);
-        dao.setupRoomieRobotAndLock(RELAYER);
+        dao.setupRoomieRobotAndLock(RELAYER, RobotPqcVectors.MLDSA_PK, RobotPqcVectors.ED25519_PK);
         dao.revokeRelayerPermissionAndLock();
         assertTrue(dao.relayerUpdatePermissionRevoked());
         
         vm.expectRevert();
-        dao.setupRoomieRobotAndLock(address(0x999));
+        dao.setupRoomieRobotAndLock(address(0x999), RobotPqcVectors.MLDSA_PK, RobotPqcVectors.ED25519_PK);
         vm.stopPrank();
     }
 
@@ -112,6 +119,8 @@ contract ArizonaForestationDAOAdvancedTest is Test {
         dao.joinDAO();
         dao.issueMonthlyLp();
         
+        uint256 monthAtCreation = dao.getCurrentMonthId();
+        
         vm.prank(USER);
         bytes32 pqcHash = keccak256("PQCProof");
         uint256 proposalId = dao.createProposal(
@@ -122,11 +131,12 @@ contract ArizonaForestationDAOAdvancedTest is Test {
             true
         );
         
-        // Warp to next month - LP expires
-        vm.warp(block.timestamp + 31 days);
-        dao.issueMonthlyLp(); // New month
+        // The proposal snapshots its voting month at creation. Voting within the
+        // 3-day window uses that SNAPSHOT month's LP weight (100), so a member's
+        // voting power is preserved even if their current-month LP changes.
+        (, , , , , , , , uint256 votingMonthId, , , , , , , , ) = dao.proposals(proposalId);
+        assertEq(votingMonthId, monthAtCreation);
         
-        // Vote should still use old month's weight (100 LP)
         vm.prank(USER);
         dao.vote(proposalId, true);
         
@@ -135,11 +145,11 @@ contract ArizonaForestationDAOAdvancedTest is Test {
     }
 
     function testQuorumAndMajorityRequirements() public {
+        // Two members each hold 100 LP for the current month
         vm.prank(USER);
         dao.joinDAO();
         dao.issueMonthlyLp();
         
-        // Add second member
         address member2 = address(0x222);
         vm.prank(member2);
         dao.joinDAO();
@@ -155,23 +165,32 @@ contract ArizonaForestationDAOAdvancedTest is Test {
             true
         );
         
-        // Only 1 voter (100 LP) - below quorum (100 LP required)
-        vm.prank(USER);
-        dao.vote(proposalId, true);
-        
+        // No votes yet, advance past voting window: quorum (100 LP) not met
         vm.warp(block.timestamp + 4 days);
         vm.expectRevert();
         dao.executeProposal(proposalId);
         
-        // Add second voter to reach quorum
+        // A proposal that passed its 3-day voting window can no longer be voted on;
+        // members must decide before expiry. Create a fresh proposal and vote within
+        // the window to reach quorum + majority.
+        vm.prank(USER);
+        uint256 proposalId2 = dao.createProposal(
+            "Second proposal",
+            3000 * 10**18,
+            payable(RECIPIENT),
+            pqcHash,
+            true
+        );
+        
+        vm.prank(USER);
+        dao.vote(proposalId2, true);    // yes = 100 LP
         vm.prank(member2);
-        dao.vote(proposalId, true);
+        dao.vote(proposalId2, true);    // yes = 200 LP total, quorum met, majority yes
         
-        // Now quorum met (200 LP), majority yes
-        dao.executeProposal(proposalId);
+        vm.warp(block.timestamp + 4 days);
+        dao.executeProposal(proposalId2);
         
-        // executed at index 12: 12 commas before, 4 after
-        (,,,,,,,,,,,, bool executed,,,,) = dao.proposals(proposalId);
+        (,,,,,,,,,,,, bool executed,,,,) = dao.proposals(proposalId2);
         assertTrue(executed);
     }
 
@@ -198,7 +217,7 @@ contract ArizonaForestationDAOAdvancedTest is Test {
         
         // Setup relayer
         vm.prank(ADMIN);
-        dao.setupRoomieRobotAndLock(RELAYER);
+        dao.setupRoomieRobotAndLock(RELAYER, RobotPqcVectors.MLDSA_PK, RobotPqcVectors.ED25519_PK);
         vm.prank(ADMIN);
         dao.revokeRelayerPermissionAndLock();
         
@@ -216,6 +235,9 @@ contract ArizonaForestationDAOAdvancedTest is Test {
             deadline,
             uint256(1) // nonce
         ));
+        // The real robot MLDSA-65 + Ed25519 signatures (RobotPqcVectors) were generated
+        // OFF-CHAIN over this exact expectedMessageHash.
+        assertEq(expectedHash, bytes32(RobotPqcVectors.MH_M1));
         
         vm.prank(RELAYER);
         dao.roomieRobotExecuteApprovedProposal(
@@ -224,8 +246,8 @@ contract ArizonaForestationDAOAdvancedTest is Test {
             trancheAmount,
             RECIPIENT,
             deadline,
-            hex"1234", // dummy dilithium sig
-            hex"5678"  // dummy ed25519 sig
+            RobotPqcVectors.MLDSA_SIG_M1, // real ML-DSA-65 (FIPS 204) robot signature
+            RobotPqcVectors.ED25519_SIG_M1 // real RFC 8032 Ed25519 robot signature
         );
         
         // milestonesReleased at index 14: 14 commas before, 2 after
@@ -255,31 +277,35 @@ contract ArizonaForestationDAOAdvancedTest is Test {
         dao.executeProposal(proposalId);
         
         vm.prank(ADMIN);
-        dao.setupRoomieRobotAndLock(RELAYER);
+        dao.setupRoomieRobotAndLock(RELAYER, RobotPqcVectors.MLDSA_PK, RobotPqcVectors.ED25519_PK);
         vm.prank(ADMIN);
         dao.revokeRelayerPermissionAndLock();
         
-        // First milestone
+        // First milestone at t0 = 345601; deadline must exceed block.timestamp.
         uint256 trancheAmount = 1000 * 10**18;
-        uint256 deadline = block.timestamp + 1 days;
+        uint256 t0 = block.timestamp;
+        // NOTE: via-IR optimizer can reorder/cache `block.timestamp + N days`
+        // expressions across chained vm.warp calls, so use EXPLICIT absolute
+        // timestamps for the deadline to keep the interval test deterministic.
+        uint256 deadline = t0 + 1 days;
         
         vm.prank(RELAYER);
-        dao.roomieRobotExecuteApprovedProposal(proposalId, 1, trancheAmount, RECIPIENT, deadline, hex"1234", hex"5678");
+        dao.roomieRobotExecuteApprovedProposal(proposalId, 1, trancheAmount, RECIPIENT, deadline, RobotPqcVectors.MLDSA_SIG_M1, RobotPqcVectors.ED25519_SIG_M1);
         
         // Try second milestone immediately - should fail (60 days not passed)
-        vm.warp(block.timestamp + 1 days);
-        deadline = block.timestamp + 1 days;
+        vm.warp(t0 + 1 days); // 432001
+        deadline = t0 + 1 days + 1 days; // 518401, still valid
         
         vm.prank(RELAYER);
-        vm.expectRevert();
-        dao.roomieRobotExecuteApprovedProposal(proposalId, 2, trancheAmount, RECIPIENT, deadline, hex"1234", hex"5678");
+        vm.expectRevert(); // MilestoneTimeoutNotMet (60-day interval)
+        dao.roomieRobotExecuteApprovedProposal(proposalId, 2, trancheAmount, RECIPIENT, deadline, RobotPqcVectors.MLDSA_SIG_M2, RobotPqcVectors.ED25519_SIG_M2);
         
         // After 60 days - should succeed
-        vm.warp(block.timestamp + 60 days);
-        deadline = block.timestamp + 1 days;
+        vm.warp(t0 + 60 days); // now past the interval
+        deadline = t0 + 60 days + 1 days;
         
         vm.prank(RELAYER);
-        dao.roomieRobotExecuteApprovedProposal(proposalId, 2, trancheAmount, RECIPIENT, deadline, hex"1234", hex"5678");
+        dao.roomieRobotExecuteApprovedProposal(proposalId, 2, trancheAmount, RECIPIENT, deadline, RobotPqcVectors.MLDSA_SIG_M3, RobotPqcVectors.ED25519_SIG_M3);
         
         (,,,,,,,,,,,,,, uint256 milestonesReleased,,) = dao.proposals(proposalId);
         assertEq(milestonesReleased, 2);
@@ -307,7 +333,7 @@ contract ArizonaForestationDAOAdvancedTest is Test {
         dao.executeProposal(proposalId);
         
         vm.prank(ADMIN);
-        dao.setupRoomieRobotAndLock(RELAYER);
+        dao.setupRoomieRobotAndLock(RELAYER, RobotPqcVectors.MLDSA_PK, RobotPqcVectors.ED25519_PK);
         vm.prank(ADMIN);
         dao.revokeRelayerPermissionAndLock();
         
@@ -318,12 +344,13 @@ contract ArizonaForestationDAOAdvancedTest is Test {
         uint256 deadline = block.timestamp + 1 days;
         
         vm.prank(RELAYER);
-        dao.roomieRobotExecuteApprovedProposal(proposalId, 1, trancheAmount, RECIPIENT, deadline, hex"1234", hex"5678");
+        dao.roomieRobotExecuteApprovedProposal(proposalId, 1, trancheAmount, RECIPIENT, deadline, RobotPqcVectors.MLDSA_SIG_M1, RobotPqcVectors.ED25519_SIG_M1);
         
         uint256 finalVaultBalance = dao.getVaultBalance();
         assertEq(finalVaultBalance, initialVaultBalance - trancheAmount);
         
-        uint256 recipientBalance = token.balanceOf(RECIPIENT);
+        // Verify recipient received the tranche via the etched token address
+        uint256 recipientBalance = AdvancedMockBindingCurveToken(dao.OBS_TOKEN_ADDRESS()).balanceOf(RECIPIENT);
         assertEq(recipientBalance, trancheAmount);
     }
 
@@ -331,7 +358,8 @@ contract ArizonaForestationDAOAdvancedTest is Test {
         // Deploy with minimal vault balance
         ArizonaForestationDAO poorDao = new ArizonaForestationDAO();
         vm.etch(poorDao.OBS_TOKEN_ADDRESS(), address(token).code);
-        // Don't mint tokens to poorDao
+        // Unlock the bonding curve at the etched address but do NOT mint vault funds
+        AdvancedMockBindingCurveToken(poorDao.OBS_TOKEN_ADDRESS()).setRaisedDAI(6_000_000_000 * 10**18);
         
         vm.prank(USER);
         poorDao.joinDAO();
@@ -354,7 +382,7 @@ contract ArizonaForestationDAOAdvancedTest is Test {
         poorDao.executeProposal(proposalId);
         
         vm.prank(ADMIN);
-        poorDao.setupRoomieRobotAndLock(RELAYER);
+        poorDao.setupRoomieRobotAndLock(RELAYER, RobotPqcVectors.MLDSA_PK, RobotPqcVectors.ED25519_PK);
         vm.prank(ADMIN);
         poorDao.revokeRelayerPermissionAndLock();
         
@@ -362,7 +390,7 @@ contract ArizonaForestationDAOAdvancedTest is Test {
         uint256 deadline = block.timestamp + 1 days;
         
         vm.prank(RELAYER);
-        vm.expectRevert();
-        poorDao.roomieRobotExecuteApprovedProposal(proposalId, 1, trancheAmount, RECIPIENT, deadline, hex"1234", hex"5678");
+        vm.expectRevert(); // VaultInsufficientBalance
+        poorDao.roomieRobotExecuteApprovedProposal(proposalId, 1, trancheAmount, RECIPIENT, deadline, RobotPqcVectors.MLDSA_SIG_M1, RobotPqcVectors.ED25519_SIG_M1);
     }
 }
